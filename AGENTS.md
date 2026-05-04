@@ -7,6 +7,27 @@
 - **Language**: TypeScript 5
 - **UI 组件**: shadcn/ui (基于 Radix UI)
 - **Styling**: Tailwind CSS 4
+- **后端**: Python Flask API (端口 8000)
+- **核心功能**: SeekRare 罕见病 AI 诊断平台
+
+## 项目概述
+
+SeekRare Web 是一个基于大语言模型（LLM）的罕见病诊断平台，用于分析患者临床表型和基因组变异数据。
+
+### 架构
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Next.js 前端   │ ──> │  Flask API 后端  │ ──> │   SeekRare 包   │
+│   (端口 5000)   │     │   (端口 8000)    │     │   (Python)      │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+### 服务配置
+
+- **前端服务**: http://localhost:5000 (Next.js)
+- **API 服务**: http://localhost:8000 (Python Flask)
+- **环境变量**: `.env` 文件配置 LLM API 密钥
 
 ## 目录结构
 
@@ -14,16 +35,19 @@
 ├── public/                 # 静态资源
 ├── scripts/                # 构建与启动脚本
 │   ├── build.sh            # 构建脚本
-│   ├── dev.sh              # 开发环境启动脚本
+│   ├── dev.sh              # 开发环境启动脚本（同时启动前端+后端）
 │   ├── prepare.sh          # 预处理脚本
 │   └── start.sh            # 生产环境启动脚本
 ├── src/
 │   ├── app/                # 页面路由与布局
+│   │   └── page.tsx       # SeekRare 主页面
 │   ├── components/ui/      # Shadcn UI 组件库
 │   ├── hooks/              # 自定义 Hooks
 │   ├── lib/                # 工具库
 │   │   └── utils.ts        # 通用工具函数 (cn)
 │   └── server.ts           # 自定义服务端入口
+├── seekrare_api.py         # Python Flask API 服务
+├── .env                    # 环境变量配置
 ├── next.config.ts          # Next.js 配置
 ├── package.json            # 项目依赖管理
 └── tsconfig.json           # TypeScript 配置
@@ -63,3 +87,69 @@
 
 - 模板默认预装核心组件库 `shadcn/ui`，位于`src/components/ui/`目录下
 - Next.js 项目**必须默认**采用 shadcn/ui 组件、风格和规范，**除非用户指定用其他的组件和规范。**
+
+## SeekRare API 开发指南
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/health` | GET | 健康检查 |
+| `/api/config` | GET | 获取服务端配置 |
+| `/api/analyze` | POST | 同步分析接口 |
+| `/api/analyze/stream` | POST | 流式分析接口 (SSE) |
+
+### 环境变量配置 (.env)
+
+```bash
+# LLM API 配置（必填）
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o
+LLM_API_KEY=your-api-key-here
+LLM_BASE_URL=  # 可选，用于代理或其他 API
+
+# 可选：参考基因组和注释文件路径
+# REF_FASTA=/path/to/GRCh38.fa
+# GTF_FILE=/path/to/genomic.gtf
+# CLINVAR_VCF=/path/to/clinvar.vcf.gz
+# DBSNP_VCF=/path/to/dbsnp.vcf.gz
+```
+
+### 启动服务
+
+```bash
+# 开发环境（同时启动前端+后端）
+pnpm dev
+
+# 或者分别启动
+# 1. 启动 Python API
+python3 seekrare_api.py
+
+# 2. 启动 Next.js 前端
+pnpm run dev
+```
+
+### SeekRare 包依赖
+
+SeekRare 包已安装在系统 Python 环境中，位于 `/workspace/projects/SeekRare/`。
+
+如需更新或重新安装：
+```bash
+cd /workspace/projects/SeekRare
+pip install -e .
+```
+
+### 前端调用 API
+
+前端通过 `NEXT_PUBLIC_API_URL` 环境变量指定 API 地址：
+- 开发环境：`http://localhost:8000`
+- 生产环境：根据部署环境配置
+
+### 流式响应 (SSE)
+
+`/api/analyze/stream` 接口返回 Server-Sent Events 格式的实时进度：
+- `type: start` - 开始分析
+- `type: progress` - 进度更新
+- `type: stage1_complete` - Stage 1 完成
+- `type: complete` - 分析完成，包含最终结果
+- `type: error` - 错误信息
