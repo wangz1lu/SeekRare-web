@@ -146,6 +146,59 @@ curl -X POST http://localhost:8000/api/analyze/stream \
    pnpm start
    ```
 
+## 部署到 Linux 服务器
+
+### 方式一：Docker 部署（推荐）
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/你的用户名/seekrare-web.git
+cd seekrare-web
+
+# 2. 配置环境变量
+cp .env.example .env
+nano .env  # 编辑并填入 LLM_API_KEY
+
+# 3. 启动服务
+docker-compose up -d
+```
+
+### 方式二：手动部署
+
+```bash
+# 1. 安装依赖
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs python3 python3-pip
+
+# 2. 克隆项目
+git clone https://github.com/你的用户名/seekrare-web.git
+cd seekrare-web
+
+# 3. 安装 Python 依赖
+pip3 install -e ./SeekRare
+pip3 install flask flask-cors gunicorn
+
+# 4. 安装 Node 依赖并构建
+npm install -g pnpm
+pnpm install
+pnpm run build
+
+# 5. 启动服务
+pkill -f "seekrare_api" || true
+nohup gunicorn -w 2 -b 0.0.0.0:8000 "seekrare_api:app" > logs/api.log 2>&1 &
+nohup pnpm start > logs/web.log 2>&1 &
+```
+
+### 方式三：上传 GitHub 后在服务器拉取
+
+```bash
+# 在服务器上
+git clone https://github.com/你的用户名/seekrare-web.git
+cd seekrare-web
+
+# 配置并启动（同方式二的步骤 3-5）
+```
+
 ## License
 
 MIT License - 详见 [SeekRare 仓库](https://github.com/wangz1lu/SeekRare)
