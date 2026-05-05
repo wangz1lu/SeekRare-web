@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -8,6 +8,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Table,
   TableBody,
@@ -17,7 +19,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  AlertCircle,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Upload,
   FileText,
   Activity,
@@ -25,9 +32,19 @@ import {
   CheckCircle2,
   XCircle,
   Info,
+  Dna,
+  Brain,
+  Microscope,
+  ChevronDown,
+  ChevronUp,
+  Image as ImageIcon,
+  Sparkles,
+  FlaskConical,
+  Layers,
 } from "lucide-react";
 
-interface CandidateVariant {
+interface VariantRow {
+  id: number;
   CHROM?: string;
   POS?: number;
   REF?: string;
@@ -40,25 +57,30 @@ interface CandidateVariant {
   [key: string]: unknown;
 }
 
-interface LLMInterpretation {
-  relevant_hpos?: Array<{ hpo_id: string; score: number }>;
-  weight_vector?: Record<string, number>;
-}
-
 interface AnalysisResult {
   session_id: string;
   symptoms: string;
   stage1?: {
     total_variants: number;
-    columns: string[];
-    sample: unknown[];
   };
-  candidates: CandidateVariant[];
+  csv_path: string;
+  csv_data: VariantRow[];
   total_candidates: number;
-  llm_interpretation?: LLMInterpretation;
+  llm_interpretation?: {
+    relevant_hpos?: Array<{ hpo_id: string; score: number }>;
+    weight_vector?: Record<string, number>;
+  };
 }
 
 type AnalysisStatus = "idle" | "uploading" | "processing" | "complete" | "error";
+
+const DNA_COLORS = {
+  primary: "#6366f1", // indigo
+  secondary: "#8b5cf6", // violet
+  accent: "#06b6d4", // cyan
+  background: "#0f172a", // slate-900
+  surface: "#1e293b", // slate-800
+};
 
 export default function SeekRarePage() {
   const [symptoms, setSymptoms] = useState("");
@@ -70,18 +92,49 @@ export default function SeekRarePage() {
   const [progressMessage, setProgressMessage] = useState("");
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [showAdvancedDialog, setShowAdvancedDialog] = useState(false);
+  const [advancedAnalysisType, setAdvancedAnalysisType] = useState<"genos" | "alphafold" | null>(null);
+  const [advancedProcessing, setAdvancedProcessing] = useState(false);
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
+  const [imageModal, setImageModal] = useState<{ open: boolean; src: string; title: string }>({
+    open: false,
+    src: "",
+    title: "",
+  });
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = useCallback(
     (setter: React.Dispatch<React.SetStateAction<File | null>>) => (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) {
-        setter(file);
-      }
+      if (file) setter(file);
     },
     []
   );
 
-  const analyzeVariants = async () => {
+  const toggleRowSelection = useCallback((id: number) => {
+    setSelectedRows((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
+      }
+      return newSet;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    if (!result) return;
+    if (selectedRows.size === result.csv_data.length) {
+      setSelectedRows(new Set());
+    } else {
+      setSelectedRows(new Set(result.csv_data.map((r) => r.id)));
+    }
+  }, [result, selectedRows]);
+
+  const startAnalysis = async () => {
     if (!symptoms.trim()) {
       setError("请输入患者症状描述");
       return;
@@ -93,8 +146,8 @@ export default function SeekRarePage() {
 
     setError(null);
     setStatus("uploading");
-    setProgress(10);
-    setProgressMessage("上传文件...");
+    setProgress(5);
+    setProgressMessage("准备上传...");
 
     const formData = new FormData();
     formData.append("symptoms", symptoms);
@@ -104,8 +157,8 @@ export default function SeekRarePage() {
 
     try {
       setStatus("processing");
-      setProgress(30);
-      setProgressMessage("正在连接分析服务...");
+      setProgress(15);
+      setProgressMessage("上传文件至服务器...");
 
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const response = await fetch(`${apiUrl}/api/analyze/stream`, {
@@ -113,20 +166,16 @@ export default function SeekRarePage() {
         body: formData,
       });
 
-      if (!response.ok) {
-        throw new Error(`请求失败: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`请求失败: ${response.status}`);
 
       const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("无法读取响应流");
-      }
+      if (!reader) throw new Error("无法读取响应流");
 
       const decoder = new TextDecoder();
       let buffer = "";
 
-      setProgress(50);
-      setProgressMessage("正在分析变异...");
+      setProgress(30);
+      setProgressMessage("服务器正在分析 VCF 文件...");
 
       while (true) {
         const { done, value } = await reader.read();
@@ -145,11 +194,12 @@ export default function SeekRarePage() {
                 case "progress":
                   setProgressMessage(data.message);
                   if (data.stage === 1) setProgress(40);
-                  if (data.stage === 3) setProgress(60);
+                  if (data.stage === 2) setProgress(55);
+                  if (data.stage === 3) setProgress(70);
                   break;
-                case "stage1_complete":
-                  setProgress(70);
-                  setProgressMessage(`发现 ${data.total_variants} 个变异位点`);
+                case "stage_complete":
+                  setProgress(85);
+                  setProgressMessage("LLM 正在生成排序结果...");
                   break;
                 case "complete":
                   setProgress(100);
@@ -162,7 +212,7 @@ export default function SeekRarePage() {
                   break;
               }
             } catch {
-              // 忽略解析错误
+              // ignore parse errors
             }
           }
         }
@@ -173,393 +223,673 @@ export default function SeekRarePage() {
     }
   };
 
-  const getClinvarBadgeVariant = (sig: string | undefined): "default" | "secondary" | "destructive" | "outline" => {
+  const runAdvancedAnalysis = async () => {
+    if (selectedRows.size === 0) {
+      setError("请先选择要分析的变异位点");
+      return;
+    }
+    if (!advancedAnalysisType) {
+      setError("请选择分析类型");
+      return;
+    }
+
+    setAdvancedProcessing(true);
+    setShowAdvancedDialog(false);
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${apiUrl}/api/advanced-analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: result?.session_id,
+          selected_rows: Array.from(selectedRows),
+          analysis_type: advancedAnalysisType,
+          csv_data: result?.csv_data.filter((r) => selectedRows.has(r.id)),
+        }),
+      });
+
+      if (!response.ok) throw new Error("高级分析请求失败");
+
+      const data = await response.json();
+      
+      // 更新结果，添加图片链接
+      if (result && data.results) {
+        const updatedData = result.csv_data.map((row) => {
+          const analysisResult = data.results.find(
+            (r: { id: number }) => r.id === row.id
+          );
+          if (analysisResult) {
+            return {
+              ...row,
+              genos_image: analysisResult.genos_image,
+              alphafold_image: analysisResult.alphafold_image,
+            };
+          }
+          return row;
+        });
+        setResult({ ...result, csv_data: updatedData });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "高级分析失败");
+    } finally {
+      setAdvancedProcessing(false);
+      setSelectedRows(new Set());
+    }
+  };
+
+  const getClinvarBadgeVariant = (
+    sig: string | undefined
+  ): "default" | "secondary" | "destructive" | "outline" => {
     if (!sig) return "outline";
     const lower = sig.toLowerCase();
-    if (lower.includes("pathogenic") || lower.includes("likely pathogenic")) return "destructive";
-    if (lower.includes("benign") || lower.includes("likely benign")) return "secondary";
+    if (lower.includes("pathogenic") || lower.includes("likely pathogenic"))
+      return "destructive";
+    if (lower.includes("benign") || lower.includes("likely benign"))
+      return "secondary";
     return "outline";
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800">
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950">
       {/* Header */}
-      <header className="border-b bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm sticky top-0 z-10">
+      <header className="border-b border-slate-800/50 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-50">
         <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-              <Activity className="w-6 h-6 text-white" />
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 via-purple-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                  <Dna className="w-7 h-7 text-white" />
+                </div>
+                <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-cyan-500 rounded-xl blur opacity-30 -z-10" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-white via-indigo-200 to-cyan-200 bg-clip-text text-transparent">
+                  SeekRare
+                </h1>
+                <p className="text-xs text-slate-400">罕见病 AI 诊断平台</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight">SeekRare</h1>
-              <p className="text-xs text-muted-foreground">罕见病 AI 诊断平台</p>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="bg-indigo-500/10 text-indigo-300 border-indigo-500/30">
+                <Sparkles className="w-3 h-3 mr-1" />
+                LLM Powered
+              </Badge>
             </div>
           </div>
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8 max-w-6xl">
-        <div className="grid gap-8 lg:grid-cols-3">
-          {/* 左侧：输入区域 */}
-          <div className="lg:col-span-1 space-y-6">
-            {/* 症状输入 */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <FileText className="w-5 h-5" />
-                  患者症状
-                </CardTitle>
-                <CardDescription>
-                  描述患者的临床表型和症状（支持中文）
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Textarea
-                  placeholder="例如：智力障碍，癫痫发作，全身肌张力低下，发育迟缓..."
-                  value={symptoms}
-                  onChange={(e) => setSymptoms(e.target.value)}
-                  rows={5}
-                  className="resize-none"
-                />
-                <p className="text-xs text-muted-foreground mt-2">
-                  症状描述越详细，诊断越准确
-                </p>
-              </CardContent>
-            </Card>
-
-            {/* VCF 文件上传 */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Upload className="w-5 h-5" />
-                  VCF 文件上传
-                </CardTitle>
-                <CardDescription>
-                  上传家系基因组变异文件（支持 .vcf.gz 和 .vcf）
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {/* 先证者 */}
-                <div className="space-y-2">
-                  <label className="text-sm font-medium flex items-center gap-2">
-                    <span className="text-red-500">*</span> 先证者 VCF
-                  </label>
-                  <div className="relative">
-                    <Input
-                      type="file"
-                      accept=".vcf.gz,.vcf"
-                      onChange={handleFileChange(setProbandFile)}
-                      className="file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100"
-                    />
-                  </div>
-                  {probandFile && (
-                    <p className="text-xs text-green-600 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      {probandFile.name}
-                    </p>
-                  )}
-                </div>
-
-                <Separator />
-
-                {/* 父亲 */}
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">父亲 VCF（可选）</label>
-                  <Input
-                    type="file"
-                    accept=".vcf.gz,.vcf"
-                    onChange={handleFileChange(setFatherFile)}
-                    className="file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-slate-50 file:text-slate-600 hover:file:bg-slate-100"
-                  />
-                  {fatherFile && (
-                    <p className="text-xs text-green-600 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      {fatherFile.name}
-                    </p>
-                  )}
-                </div>
-
-                {/* 母亲 */}
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">母亲 VCF（可选）</label>
-                  <Input
-                    type="file"
-                    accept=".vcf.gz,.vcf"
-                    onChange={handleFileChange(setMotherFile)}
-                    className="file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-slate-50 file:text-slate-600 hover:file:bg-slate-100"
-                  />
-                  {motherFile && (
-                    <p className="text-xs text-green-600 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      {motherFile.name}
-                    </p>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* 开始分析按钮 */}
-            <Button
-              onClick={analyzeVariants}
-              disabled={status === "processing" || status === "uploading"}
-              className="w-full h-12 text-base"
-              size="lg"
-            >
-              {status === "processing" || status === "uploading" ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  分析中...
-                </>
-              ) : (
-                <>
-                  <Activity className="w-4 h-4 mr-2" />
-                  开始分析
-                </>
-              )}
-            </Button>
-
-            {/* 进度显示 */}
-            {(status === "processing" || status === "uploading") && (
-              <Card>
-                <CardContent className="pt-6">
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">{progressMessage}</span>
-                      <span className="font-medium">{progress}%</span>
-                    </div>
-                    <Progress value={progress} className="h-2" />
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* 错误显示 */}
-            {error && (
-              <Card className="border-red-200 bg-red-50 dark:bg-red-900/20">
-                <CardContent className="pt-6">
-                  <div className="flex items-start gap-3">
-                    <XCircle className="w-5 h-5 text-red-500 mt-0.5" />
-                    <div>
-                      <p className="font-medium text-red-700 dark:text-red-400">分析失败</p>
-                      <p className="text-sm text-red-600 dark:text-red-300">{error}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* LLM 解释 */}
-            {result?.llm_interpretation && (
-              <Card>
+      <main className="container mx-auto px-4 py-8 max-w-7xl">
+        {status === "idle" && !result && (
+          /* ===== Input Phase ===== */
+          <div className="grid lg:grid-cols-5 gap-8">
+            {/* Left: Form */}
+            <div className="lg:col-span-2 space-y-6">
+              {/* Hero Card */}
+              <Card className="bg-gradient-to-br from-indigo-900/40 to-purple-900/40 border-indigo-500/20">
                 <CardHeader>
-                  <CardTitle className="text-base flex items-center gap-2">
-                    <Info className="w-4 h-4" />
-                    LLM 症状解析
+                  <CardTitle className="flex items-center gap-3 text-xl">
+                    <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center">
+                      <Brain className="w-5 h-5 text-white" />
+                    </div>
+                    智能诊断
                   </CardTitle>
+                  <CardDescription className="text-slate-400">
+                    输入患者症状，系统自动分析基因组变异
+                  </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-4">
-                  {result.llm_interpretation.relevant_hpos && (
-                    <div>
-                      <p className="text-sm font-medium mb-2">相关 HPO 术语：</p>
-                      <div className="flex flex-wrap gap-1">
-                        {result.llm_interpretation.relevant_hpos.map((hpo, i) => (
-                          <Badge key={i} variant="outline" className="text-xs">
-                            {hpo.hpo_id} ({hpo.score.toFixed(2)})
-                          </Badge>
-                        ))}
+                <CardContent>
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5">
+                      <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center">
+                        <span className="text-cyan-400 font-bold text-sm">1</span>
                       </div>
+                      <span className="text-sm text-slate-300">输入临床表型描述</span>
                     </div>
-                  )}
-                  {result.llm_interpretation.weight_vector && (
-                    <div>
-                      <p className="text-sm font-medium mb-2">权重向量：</p>
-                      <div className="space-y-1">
-                        {Object.entries(result.llm_interpretation.weight_vector).map(([key, value]) => (
-                          <div key={key} className="flex justify-between text-xs">
-                            <span className="text-muted-foreground">{key}</span>
-                            <span className="font-medium">{(value as number * 100).toFixed(0)}%</span>
-                          </div>
-                        ))}
+                    <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5">
+                      <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center">
+                        <span className="text-cyan-400 font-bold text-sm">2</span>
                       </div>
+                      <span className="text-sm text-slate-300">上传基因组变异文件</span>
                     </div>
-                  )}
+                    <div className="flex items-center gap-3 p-3 rounded-lg bg-white/5">
+                      <div className="w-8 h-8 rounded-full bg-cyan-500/20 flex items-center justify-center">
+                        <span className="text-cyan-400 font-bold text-sm">3</span>
+                      </div>
+                      <span className="text-sm text-slate-300">获取 AI 排序结果</span>
+                    </div>
+                  </div>
                 </CardContent>
               </Card>
-            )}
-          </div>
 
-          {/* 右侧：结果展示 */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* 分析状态 */}
-            {status === "idle" && !result && (
-              <Card className="min-h-[400px] flex items-center justify-center">
-                <CardContent className="text-center py-16">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
-                    <Activity className="w-8 h-8 text-slate-400" />
-                  </div>
-                  <h3 className="text-lg font-medium mb-2">准备就绪</h3>
-                  <p className="text-sm text-muted-foreground max-w-md mx-auto">
-                    请在左侧输入患者症状描述并上传 VCF 文件，然后点击「开始分析」进行罕见病诊断
+              {/* Symptoms Input */}
+              <Card className="bg-slate-900/60 border-slate-700/50 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <FileText className="w-5 h-5 text-indigo-400" />
+                    患者症状描述
+                  </CardTitle>
+                  <CardDescription className="text-slate-400">
+                    描述患者的临床表型（支持中文）
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Textarea
+                    placeholder="例如：智力障碍，癫痫发作，全身肌张力低下，发育迟缓，视网膜色素变性..."
+                    value={symptoms}
+                    onChange={(e) => setSymptoms(e.target.value)}
+                    rows={4}
+                    className="bg-slate-800/50 border-slate-600/50 text-white placeholder:text-slate-500 resize-none"
+                  />
+                  <p className="text-xs text-slate-500 mt-2">
+                    症状描述越详细，诊断越准确
                   </p>
                 </CardContent>
               </Card>
-            )}
 
-            {/* 分析完成 */}
-            {status === "complete" && result && (
-              <>
-                {/* 结果摘要 */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <CheckCircle2 className="w-5 h-5 text-green-500" />
-                      分析完成
-                    </CardTitle>
-                    <CardDescription>
-                      Session ID: {result.session_id} | 共发现 {result.total_candidates} 个候选变异
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid grid-cols-3 gap-4">
-                      <div className="text-center p-4 rounded-lg bg-slate-50 dark:bg-slate-800">
-                        <p className="text-2xl font-bold text-blue-600">
-                          {result.stage1?.total_variants || 0}
+              {/* VCF Upload */}
+              <Card className="bg-slate-900/60 border-slate-700/50 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <Upload className="w-5 h-5 text-cyan-400" />
+                    VCF 文件上传
+                  </CardTitle>
+                  <CardDescription className="text-slate-400">
+                    支持 .vcf.gz 和 .vcf 格式
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium flex items-center gap-2">
+                      <span className="text-red-400">*</span> 先证者 VCF
+                    </label>
+                    <div
+                      className="border-2 border-dashed border-slate-600 rounded-xl p-6 text-center cursor-pointer hover:border-indigo-500/50 transition-colors"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".vcf.gz,.vcf"
+                        onChange={handleFileChange(setProbandFile)}
+                        className="hidden"
+                      />
+                      {probandFile ? (
+                        <div className="flex items-center justify-center gap-2 text-green-400">
+                          <CheckCircle2 className="w-5 h-5" />
+                          <span className="text-sm">{probandFile.name}</span>
+                        </div>
+                      ) : (
+                        <div className="text-slate-400">
+                          <Upload className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                          <p className="text-sm">点击或拖拽上传</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <Separator className="bg-slate-700/50" />
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-slate-400">
+                        父亲 VCF（可选）
+                      </label>
+                      <Input
+                        type="file"
+                        accept=".vcf.gz,.vcf"
+                        onChange={handleFileChange(setFatherFile)}
+                        className="bg-slate-800/50 border-slate-600/50"
+                      />
+                      {fatherFile && (
+                        <p className="text-xs text-green-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          {fatherFile.name}
                         </p>
-                        <p className="text-xs text-muted-foreground">总变异数</p>
-                      </div>
-                      <div className="text-center p-4 rounded-lg bg-slate-50 dark:bg-slate-800">
-                        <p className="text-2xl font-bold text-green-600">
-                          {result.total_candidates}
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-slate-400">
+                        母亲 VCF（可选）
+                      </label>
+                      <Input
+                        type="file"
+                        accept=".vcf.gz,.vcf"
+                        onChange={handleFileChange(setMotherFile)}
+                        className="bg-slate-800/50 border-slate-600/50"
+                      />
+                      {motherFile && (
+                        <p className="text-xs text-green-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          {motherFile.name}
                         </p>
-                        <p className="text-xs text-muted-foreground">候选变异</p>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Error Alert */}
+              {error && (
+                <Alert className="bg-red-900/20 border-red-500/30 text-red-300">
+                  <XCircle className="h-4 w-4" />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+
+              {/* Submit Button */}
+              <Button
+                onClick={startAnalysis}
+                disabled={status !== "idle"}
+                className="w-full h-14 text-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 shadow-lg shadow-indigo-500/25"
+              >
+                {status !== "idle" ? (
+                  <>
+                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                    分析中...
+                  </>
+                ) : (
+                  <>
+                    <Activity className="w-5 h-5 mr-2" />
+                    开始分析
+                  </>
+                )}
+              </Button>
+
+              {/* Progress */}
+              {status !== "idle" && (
+                <Card className="bg-slate-900/60 border-slate-700/50">
+                  <CardContent className="pt-6">
+                    <div className="space-y-3">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-slate-400">{progressMessage}</span>
+                        <span className="text-indigo-400 font-medium">{progress}%</span>
                       </div>
-                      <div className="text-center p-4 rounded-lg bg-slate-50 dark:bg-slate-800">
-                        <p className="text-2xl font-bold text-purple-600">
-                          {new Set(result.candidates.map((c) => c.gene_name).filter(Boolean)).size}
-                        </p>
-                        <p className="text-xs text-muted-foreground">相关基因</p>
-                      </div>
+                      <Progress value={progress} className="h-2 bg-slate-700" />
                     </div>
                   </CardContent>
                 </Card>
+              )}
+            </div>
 
-                {/* 症状回顾 */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-base">输入症状</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm text-muted-foreground">{result.symptoms}</p>
-                  </CardContent>
-                </Card>
-
-                {/* 候选变异列表 */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center justify-between">
-                      <span>候选变异列表</span>
-                      <Badge variant="outline">{result.total_candidates} 个</Badge>
-                    </CardTitle>
-                    <CardDescription>
-                      基于表型匹配和变异评分的个性化排序结果
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead className="w-12">排名</TableHead>
-                            <TableHead>基因</TableHead>
-                            <TableHead>变异</TableHead>
-                            <TableHead>遗传方式</TableHead>
-                            <TableHead>ClinVar</TableHead>
-                            <TableHead className="text-right">评分</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {result.candidates.map((variant, index) => (
-                            <TableRow key={index}>
-                              <TableCell>
-                                <Badge
-                                  variant={index === 0 ? "default" : "secondary"}
-                                  className={index === 0 ? "bg-blue-600" : ""}
-                                >
-                                  #{variant.rank || index + 1}
-                                </Badge>
-                              </TableCell>
-                              <TableCell className="font-medium">
-                                {variant.gene_name || "-"}
-                              </TableCell>
-                              <TableCell className="font-mono text-xs">
-                                {variant.CHROM && variant.POS
-                                  ? `${variant.CHROM}:${variant.POS}`
-                                  : "-"}
-                                <br />
-                                <span className="text-muted-foreground">
-                                  {variant.REF} → {variant.ALT}
-                                </span>
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant="outline">
-                                  {variant.inheritance_type || "unknown"}
-                                </Badge>
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant={getClinvarBadgeVariant(variant.clinvar_sig)}>
-                                  {variant.clinvar_sig || "-"}
-                                </Badge>
-                              </TableCell>
-                              <TableCell className="text-right">
-                                <span className="font-bold">
-                                  {variant.seekrare_score?.toFixed(3) || "-"}
-                                </span>
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
+            {/* Right: Info */}
+            <div className="lg:col-span-3 space-y-6">
+              <Card className="bg-gradient-to-br from-slate-900/80 to-slate-800/50 border-slate-700/50 h-full">
+                <CardContent className="pt-12">
+                  <div className="text-center py-12">
+                    <div className="w-24 h-24 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-cyan-500/20 flex items-center justify-center">
+                      <Dna className="w-12 h-12 text-indigo-400" />
                     </div>
-                    {result.candidates.length === 0 && (
-                      <div className="text-center py-8">
-                        <AlertCircle className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                        <p className="text-muted-foreground">未发现符合条件的高置信度候选变异</p>
+                    <h2 className="text-2xl font-bold text-white mb-4">
+                      三阶段 AI 诊断
+                    </h2>
+                    <div className="grid grid-cols-3 gap-4 max-w-md mx-auto">
+                      <div className="p-4 rounded-xl bg-white/5">
+                        <div className="w-10 h-10 mx-auto mb-2 rounded-lg bg-indigo-500/20 flex items-center justify-center">
+                          <Layers className="w-5 h-5 text-indigo-400" />
+                        </div>
+                        <p className="text-xs text-slate-400">Stage 1</p>
+                        <p className="text-sm font-medium text-white">VCF 预处理</p>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </>
-            )}
+                      <div className="p-4 rounded-xl bg-white/5">
+                        <div className="w-10 h-10 mx-auto mb-2 rounded-lg bg-purple-500/20 flex items-center justify-center">
+                          <Sparkles className="w-5 h-5 text-purple-400" />
+                        </div>
+                        <p className="text-xs text-slate-400">Stage 3</p>
+                        <p className="text-sm font-medium text-white">LLM 排序</p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-white/5">
+                        <div className="w-10 h-10 mx-auto mb-2 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                          <Microscope className="w-5 h-5 text-cyan-400" />
+                        </div>
+                        <p className="text-xs text-slate-400">Stage 4</p>
+                        <p className="text-sm font-medium text-white">深度分析</p>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* 底部说明 */}
-        <Card className="mt-8">
-          <CardContent className="pt-6">
-            <div className="flex items-start gap-3">
-              <Info className="w-5 h-5 text-blue-500 mt-0.5" />
-              <div className="text-sm text-muted-foreground">
-                <p className="font-medium text-foreground mb-1">关于 SeekRare</p>
-                <p>
-                  SeekRare 是一个基于 LLM 的三阶段罕见病诊断系统。它通过分析患者的临床表型和基因组变异数据，
-                  为医生提供个性化的候选变异排序结果，辅助罕见病基因诊断。
-                </p>
-                <p className="mt-2">
-                  <strong>使用方法：</strong>输入患者的临床症状描述（如「智力障碍、癫痫、肌张力低下」），
-                  上传患者的 VCF 基因组变异文件（建议同时上传父母的 VCF 以进行家系分析），
-                  系统将自动分析并返回与症状相关的候选变异列表。
+        {status === "complete" && result && (
+          /* ===== Results Phase ===== */
+          <div className="space-y-6">
+            {/* Results Header */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-white">分析结果</h2>
+                <p className="text-slate-400">
+                  Session: {result.session_id} | 共 {result.total_candidates} 个候选变异
                 </p>
               </div>
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setResult(null);
+                    setStatus("idle");
+                    setSelectedRows(new Set());
+                  }}
+                  className="border-slate-600 text-slate-300"
+                >
+                  新分析
+                </Button>
+                <Button
+                  onClick={() => setShowAdvancedDialog(true)}
+                  disabled={selectedRows.size === 0 || advancedProcessing}
+                  className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500"
+                >
+                  {advancedProcessing ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      分析中...
+                    </>
+                  ) : (
+                    <>
+                      <FlaskConical className="w-4 h-4 mr-2" />
+                      高级分析 ({selectedRows.size})
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
-          </CardContent>
-        </Card>
+
+            {/* Symptoms Summary */}
+            <Card className="bg-slate-900/60 border-slate-700/50">
+              <CardContent className="pt-4">
+                <div className="flex items-start gap-3">
+                  <FileText className="w-5 h-5 text-indigo-400 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-slate-300 mb-1">输入症状</p>
+                    <p className="text-slate-400">{result.symptoms}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* LLM Interpretation */}
+            {result.llm_interpretation && (
+              <Card className="bg-slate-900/60 border-slate-700/50">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Brain className="w-4 h-4 text-purple-400" />
+                    LLM 症状解析
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex flex-wrap gap-2">
+                    {result.llm_interpretation.relevant_hpos?.map((hpo, i) => (
+                      <Badge
+                        key={i}
+                        variant="outline"
+                        className="bg-purple-500/10 text-purple-300 border-purple-500/30"
+                      >
+                        {hpo.hpo_id}
+                      </Badge>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Results Table */}
+            <Card className="bg-slate-900/60 border-slate-700/50 overflow-hidden">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">候选变异列表</CardTitle>
+                <CardDescription className="text-slate-400">
+                  基于表型匹配的个性化排序 | 勾选行后可执行高级分析
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-0">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-slate-700/50 hover:bg-transparent">
+                        <TableHead className="w-12 bg-slate-800/50">
+                          <Checkbox
+                            checked={selectedRows.size === result.csv_data.length && result.csv_data.length > 0}
+                            onCheckedChange={toggleSelectAll}
+                          />
+                        </TableHead>
+                        <TableHead className="bg-slate-800/50">排名</TableHead>
+                        <TableHead className="bg-slate-800/50">基因</TableHead>
+                        <TableHead className="bg-slate-800/50">变异</TableHead>
+                        <TableHead className="bg-slate-800/50">遗传方式</TableHead>
+                        <TableHead className="bg-slate-800/50">ClinVar</TableHead>
+                        <TableHead className="bg-slate-800/50 text-right">评分</TableHead>
+                        <TableHead className="bg-slate-800/50">GENOS</TableHead>
+                        <TableHead className="bg-slate-800/50">AlphaFold3</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {result.csv_data.map((variant) => (
+                        <>
+                          <TableRow
+                            key={variant.id}
+                            className={`border-slate-700/30 hover:bg-slate-800/30 ${
+                              selectedRows.has(variant.id) ? "bg-indigo-500/10" : ""
+                            }`}
+                          >
+                            <TableCell>
+                              <Checkbox
+                                checked={selectedRows.has(variant.id)}
+                                onCheckedChange={() => toggleRowSelection(variant.id)}
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={variant.rank === 1 ? "default" : "secondary"}
+                                className={
+                                  variant.rank === 1
+                                    ? "bg-gradient-to-r from-amber-500 to-orange-500"
+                                    : "bg-slate-700"
+                                }
+                              >
+                                #{variant.rank || variant.id}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="font-medium text-white">
+                              {variant.gene_name || "-"}
+                            </TableCell>
+                            <TableCell>
+                              <div className="font-mono text-xs">
+                                <span className="text-slate-400">
+                                  {variant.CHROM}:{variant.POS}
+                                </span>
+                                <br />
+                                <span className="text-indigo-300">
+                                  {variant.REF} → {variant.ALT}
+                                </span>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="text-xs">
+                                {variant.inheritance_type || "unknown"}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant={getClinvarBadgeVariant(variant.clinvar_sig)}
+                                className="text-xs"
+                              >
+                                {variant.clinvar_sig || "-"}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <span className="font-bold text-indigo-400">
+                                {variant.seekrare_score?.toFixed(4) || "-"}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              {(variant as Record<string, unknown>).genos_image ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() =>
+                                    setImageModal({
+                                      open: true,
+                                      src: String((variant as Record<string, unknown>).genos_image),
+                                      title: `GENOS Analysis - ${variant.gene_name || "Variant"}`,
+                                    })
+                                  }
+                                  className="text-cyan-400 hover:text-cyan-300"
+                                >
+                                  <ImageIcon className="w-4 h-4" />
+                                </Button>
+                              ) : (
+                                <span className="text-slate-600">-</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {(variant as Record<string, unknown>).alphafold_image ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() =>
+                                    setImageModal({
+                                      open: true,
+                                      src: String((variant as Record<string, unknown>).alphafold_image),
+                                      title: `AlphaFold3 - ${variant.gene_name || "Variant"}`,
+                                    })
+                                  }
+                                  className="text-cyan-400 hover:text-cyan-300"
+                                >
+                                  <ImageIcon className="w-4 h-4" />
+                                </Button>
+                              ) : (
+                                <span className="text-slate-600">-</span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        </>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* Error State */}
+        {status === "error" && (
+          <Card className="bg-red-900/20 border-red-500/30">
+            <CardContent className="pt-6">
+              <div className="flex items-start gap-4">
+                <XCircle className="w-10 h-10 text-red-400" />
+                <div>
+                  <h3 className="text-lg font-medium text-red-300">分析失败</h3>
+                  <p className="text-red-400/80 mt-1">{error}</p>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setStatus("idle");
+                      setError(null);
+                    }}
+                    className="mt-4 border-red-500/30 text-red-300"
+                  >
+                    重试
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </main>
 
+      {/* Advanced Analysis Dialog */}
+      <Dialog open={showAdvancedDialog} onOpenChange={setShowAdvancedDialog}>
+        <DialogContent className="bg-slate-900 border-slate-700">
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <FlaskConical className="w-5 h-5 text-cyan-400" />
+              选择高级分析模块
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-slate-400 text-sm">
+              已选择 {selectedRows.size} 个变异位点，请选择分析类型：
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                onClick={() => setAdvancedAnalysisType("genos")}
+                className={`p-4 rounded-xl border-2 transition-all ${
+                  advancedAnalysisType === "genos"
+                    ? "border-cyan-500 bg-cyan-500/10"
+                    : "border-slate-600 hover:border-slate-500"
+                }`}
+              >
+                <Microscope className={`w-8 h-8 mx-auto mb-2 ${
+                  advancedAnalysisType === "genos" ? "text-cyan-400" : "text-slate-400"
+                }`} />
+                <p className="font-medium text-white">GENOS 致病位点扫描</p>
+                <p className="text-xs text-slate-400 mt-1">Genos 模型深度分析</p>
+              </button>
+              <button
+                onClick={() => setAdvancedAnalysisType("alphafold")}
+                className={`p-4 rounded-xl border-2 transition-all ${
+                  advancedAnalysisType === "alphafold"
+                    ? "border-purple-500 bg-purple-500/10"
+                    : "border-slate-600 hover:border-slate-500"
+                }`}
+              >
+                <Dna className={`w-8 h-8 mx-auto mb-2 ${
+                  advancedAnalysisType === "alphafold" ? "text-purple-400" : "text-slate-400"
+                }`} />
+                <p className="font-medium text-white">AlphaFold3 结构预测</p>
+                <p className="text-xs text-slate-400 mt-1">蛋白质三维结构分析</p>
+              </button>
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                onClick={() => setShowAdvancedDialog(false)}
+                className="border-slate-600 text-slate-300"
+              >
+                取消
+              </Button>
+              <Button
+                onClick={runAdvancedAnalysis}
+                disabled={!advancedAnalysisType}
+                className="bg-gradient-to-r from-cyan-600 to-purple-600"
+              >
+                开始分析
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Image Preview Modal */}
+      <Dialog open={imageModal.open} onOpenChange={(open) => setImageModal({ ...imageModal, open })}>
+        <DialogContent className="max-w-4xl bg-slate-900 border-slate-700">
+          <DialogHeader>
+            <DialogTitle className="text-white">{imageModal.title}</DialogTitle>
+          </DialogHeader>
+          <div className="flex justify-center">
+            {imageModal.src && (
+              <img
+                src={imageModal.src}
+                alt={imageModal.title}
+                className="max-w-full max-h-[70vh] rounded-lg"
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Footer */}
-      <footer className="border-t mt-16 py-6 bg-white/50 dark:bg-slate-900/50">
-        <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <p>SeekRare - 罕见病 AI 诊断平台 | 基于双动态评分算法的基因变异优先级分析</p>
-          <p className="mt-1">Powered by Large Language Models</p>
+      <footer className="border-t border-slate-800/50 mt-16 py-6">
+        <div className="container mx-auto px-4 text-center">
+          <p className="text-sm text-slate-500">
+            SeekRare - 罕见病 AI 诊断平台 | 基于双动态评分算法的基因变异优先级分析
+          </p>
+          <p className="text-xs text-slate-600 mt-1">
+            Powered by Large Language Models
+          </p>
         </div>
       </footer>
     </div>
